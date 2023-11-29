@@ -10,6 +10,16 @@
 #include <vector>
 #include <cstring>
 
+
+#if defined(_MSC_VER)
+#include <stdlib.h>
+#include <codecvt>
+
+std::wstring utf8_to_wide_cppapi(std::string const& );
+std::string wide_to_multi_capi(std::wstring const& );
+#endif
+
+
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
 #endif
@@ -82,20 +92,21 @@ struct whisper_params {
     bool output_srt      = false;
     bool output_wts      = false;
     bool output_csv      = false;
+    bool output_tsv      = true;//false;
     bool output_jsn      = false;
     bool output_jsn_full = false;
     bool output_lrc      = false;
     bool print_special   = false;
     bool print_colors    = false;
-    bool print_progress  = false;
+    bool print_progress  = true;//false;
     bool no_timestamps   = false;
     bool log_score       = false;
-    bool use_gpu         = true;
+    bool use_gpu         = false;//true;
 
-    std::string language  = "en";
+    std::string language  = "ja"; //"en"; 
     std::string prompt;
     std::string font_path = "/System/Library/Fonts/Supplemental/Courier New Bold.ttf";
-    std::string model     = "models/ggml-base.en.bin";
+    std::string model     = "ggml-large-v3-q5_0.bin";//"models/ggml-base.en.bin";
 
     // [TDRZ] speaker turn string
     std::string tdrz_speaker_turn = " [SPEAKER_TURN]"; // TODO: set from command line
@@ -152,6 +163,7 @@ bool whisper_params_parse(int argc, char ** argv, whisper_params & params) {
         else if (arg == "-olrc" || arg == "--output-lrc")      { params.output_lrc      = true; }
         else if (arg == "-fp"   || arg == "--font-path")       { params.font_path       = argv[++i]; }
         else if (arg == "-ocsv" || arg == "--output-csv")      { params.output_csv      = true; }
+        else if (arg == "-otsv" || arg == "--output-tsv")      { params.output_tsv      = true; } // tsv
         else if (arg == "-oj"   || arg == "--output-json")     { params.output_jsn      = true; }
         else if (arg == "-ojf"  || arg == "--output-json-full"){ params.output_jsn_full = params.output_jsn = true; }
         else if (arg == "-of"   || arg == "--output-file")     { params.fname_out.emplace_back(argv[++i]); }
@@ -209,6 +221,7 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "  -owts,     --output-words      [%-7s] output script for generating karaoke video\n",     params.output_wts ? "true" : "false");
     fprintf(stderr, "  -fp,       --font-path         [%-7s] path to a monospace font for karaoke video\n",     params.font_path.c_str());
     fprintf(stderr, "  -ocsv,     --output-csv        [%-7s] output result in a CSV file\n",                    params.output_csv ? "true" : "false");
+    fprintf(stderr, "  -otsv,     --output-tsv        [%-7s] output result in a TSV file\n",                    params.output_tsv ? "true" : "false"); //added
     fprintf(stderr, "  -oj,       --output-json       [%-7s] output result in a JSON file\n",                   params.output_jsn ? "true" : "false");
     fprintf(stderr, "  -ojf,      --output-json-full  [%-7s] include more information in the JSON file\n",      params.output_jsn_full ? "true" : "false");
     fprintf(stderr, "  -of FNAME, --output-file FNAME [%-7s] output file path (without file extension)\n",      "");
@@ -321,12 +334,27 @@ void whisper_print_segment_callback(struct whisper_context * ctx, struct whisper
 
                 const int col = std::max(0, std::min((int) k_colors.size() - 1, (int) (std::pow(p, 3)*float(k_colors.size()))));
 
+                #if defined(_MSC_VER)
+                std::string ssText ;
+                ssText.assign(text);
+                std::wstring s16a = utf8_to_wide_cppapi(text);
+                std::string  sjres = wide_to_multi_capi(s16a);
+                printf("%s%s%s%s", speaker.c_str(), k_colors[col].c_str(), sjres.c_str(), "\033[0m");
+                #else
                 printf("%s%s%s%s", speaker.c_str(), k_colors[col].c_str(), text, "\033[0m");
+                #endif
             }
         } else {
             const char * text = whisper_full_get_segment_text(ctx, i);
-
+            #if defined(_MSC_VER)
+            std::string ssText ;// = str(text);
+            ssText.assign(text);
+            std::wstring s16a = utf8_to_wide_cppapi(text);
+            std::string  sjres = wide_to_multi_capi(s16a);
+            printf("%s%s", speaker.c_str(), sjres.c_str());
+            #else
             printf("%s%s", speaker.c_str(), text);
+            #endif
         }
 
         if (params.tinydiarize) {
@@ -493,6 +521,44 @@ bool output_csv(struct whisper_context * ctx, const char * fname, const whisper_
             fout << estimate_diarization_speaker(pcmf32s, t0, t1, true) << ",";
         }
         fout << "\"" << text_escaped << "\"\n";
+    }
+
+    return true;
+}
+
+bool output_tsv(struct whisper_context * ctx, const char * fname, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
+    std::ofstream fout(fname);
+    if (!fout.is_open()) {
+        fprintf(stderr, "%s: failed to open '%s' for writing\n", __func__, fname);
+        return false;
+    }
+
+    fprintf(stderr, "%s: saving output to '%s'\n", __func__, fname);
+
+    const int n_segments = whisper_full_n_segments(ctx);
+    fout << "start,end,";
+    if (params.diarize && pcmf32s.size() == 2)
+    {
+        fout << "speaker,";
+    }
+    fout << "text\n";
+
+    for (int i = 0; i < n_segments; ++i) {
+        const char * text = whisper_full_get_segment_text(ctx, i);
+        const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
+        const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+        char * text_escaped = escape_double_quotes_and_backslashes(text);
+
+        //need to multiply times returned from whisper_full_get_segment_t{0,1}() by 10 to get milliseconds.
+        //fout << 10 * t0 << "," << 10 * t1 << ",";
+        fout << 10 * t0 << "\t" << 10 * t1 << "\t";
+        if (params.diarize && pcmf32s.size() == 2)
+        {
+            // fout << estimate_diarization_speaker(pcmf32s, t0, t1, true) << ",";
+            fout << estimate_diarization_speaker(pcmf32s, t0, t1, true) << "\t";
+        }
+        //fout << "\"" << text_escaped << "\"\n";
+        fout << text_escaped << "\n";
     }
 
     return true;
@@ -1051,6 +1117,13 @@ int main(int argc, char ** argv) {
                 output_csv(ctx, fname_csv.c_str(), params, pcmf32s);
             }
 
+            // output to tSV file
+            if (params.output_tsv) {
+                //const auto fname_csv = fname_out + ".csv";
+                const auto fname_csv = fname_out + ".tsv";
+                output_tsv(ctx, fname_csv.c_str(), params, pcmf32s);
+            }
+
             // output to JSON file
             if (params.output_jsn) {
                 const auto fname_jsn = fname_out + ".json";
@@ -1076,3 +1149,25 @@ int main(int argc, char ** argv) {
 
     return 0;
 }
+
+#if defined(_MSC_VER)
+//ref https://nekko1119.hatenablog.com/entry/2017/01/02/054629
+std::wstring utf8_to_wide_cppapi(std::string const& src)
+{
+    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+    return converter.from_bytes(src);
+}
+
+//ref https://nekko1119.hatenablog.com/entry/2017/01/02/054629
+std::string wide_to_multi_capi(std::wstring const& src)
+{
+    std::size_t converted{};
+    std::vector<char> dest(src.size() * sizeof(wchar_t) + 1 , '\0');
+    if (::_wcstombs_s_l(&converted, dest.data(), dest.size(), src.data(), _TRUNCATE, ::_create_locale(LC_ALL, "jpn")) != 0) {
+        throw std::system_error{errno, std::system_category()};
+    }
+    dest.resize(std::char_traits<char>::length(dest.data()));
+    dest.shrink_to_fit();
+    return std::string(dest.begin(), dest.end());
+}
+#endif
